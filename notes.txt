@@ -1,0 +1,19 @@
+cd /home/benjination/Desktop/video_broadcast
+
+sudo apt update
+sudo apt install -y build-essential libsdl2-dev \
+  libavcodec-dev libavformat-dev libavutil-dev \
+  libswscale-dev libavdevice-dev zlib1g-dev
+
+make clean
+make
+
+export LD_LIBRARY_PATH=/opt/DIS/lib64:$LD_LIBRARY_PATH
+./video_broadcast -help
+
+cd /home/benjination/Desktop/video_broadcast
+export LD_LIBRARY_PATH=/opt/DIS/lib64:$LD_LIBRARY_PATH
+
+./video_broadcast -client \
+  -a 0 \
+  -mcastgroup 0
