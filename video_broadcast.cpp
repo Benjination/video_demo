@@ -130,11 +130,47 @@ static void run_inference(InferenceOverlay* inference, AVFrame* frame, int windo
     }
 }
 
-static void draw_inference_overlay(SDL_Renderer* renderer, const InferenceOverlay* inference, uint8_t red, uint8_t green, uint8_t blue)
+static SDL_Rect compute_video_destination_rect(SDL_Renderer* renderer, int frame_width, int frame_height)
+{
+    int output_width = frame_width;
+    int output_height = frame_height;
+    if (SDL_GetRendererOutputSize(renderer, &output_width, &output_height) != 0 || output_width <= 0 || output_height <= 0) {
+        return SDL_Rect { 0, 0, frame_width, frame_height };
+    }
+
+    float width_scale = (float)output_width / frame_width;
+    float height_scale = (float)output_height / frame_height;
+    float scale = std::min(width_scale, height_scale);
+    int scaled_width = (int)std::round(frame_width * scale);
+    int scaled_height = (int)std::round(frame_height * scale);
+    int offset_x = (output_width - scaled_width) / 2;
+    int offset_y = (output_height - scaled_height) / 2;
+
+    return SDL_Rect { offset_x, offset_y, scaled_width, scaled_height };
+}
+
+static SDL_Rect map_detection_to_destination(const cv::Rect& detection, int frame_width, int frame_height, const SDL_Rect& destination_rect)
+{
+    int left = destination_rect.x + (int)std::round((float)detection.x * destination_rect.w / frame_width);
+    int top = destination_rect.y + (int)std::round((float)detection.y * destination_rect.h / frame_height);
+    int right = destination_rect.x + (int)std::round((float)(detection.x + detection.width) * destination_rect.w / frame_width);
+    int bottom = destination_rect.y + (int)std::round((float)(detection.y + detection.height) * destination_rect.h / frame_height);
+    return SDL_Rect { left, top, right - left, bottom - top };
+}
+
+static void draw_inference_overlay(
+    SDL_Renderer* renderer,
+    const InferenceOverlay* inference,
+    int frame_width,
+    int frame_height,
+    const SDL_Rect& destination_rect,
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue)
 {
     SDL_SetRenderDrawColor(renderer, red, green, blue, SDL_ALPHA_OPAQUE);
     for (const cv::Rect& detection : inference->detections) {
-        SDL_Rect rectangle = { detection.x, detection.y, detection.width, detection.height };
+        SDL_Rect rectangle = map_detection_to_destination(detection, frame_width, frame_height, destination_rect);
         SDL_RenderDrawRect(renderer, &rectangle);
     }
 }
@@ -232,16 +268,27 @@ static void run_hand_inference(HandInferenceOverlay* inference, AVFrame* frame, 
     }
 }
 
-static void draw_hand_overlay(SDL_Renderer* renderer, const HandInferenceOverlay* inference)
+static void draw_hand_overlay(
+    SDL_Renderer* renderer,
+    const HandInferenceOverlay* inference,
+    int frame_width,
+    int frame_height,
+    const SDL_Rect& destination_rect)
 {
     SDL_SetRenderDrawColor(renderer, 30, 210, 240, SDL_ALPHA_OPAQUE);
     for (const cv::Rect& detection : inference->detections) {
-        SDL_Rect rectangle = { detection.x, detection.y, detection.width, detection.height };
+        SDL_Rect rectangle = map_detection_to_destination(detection, frame_width, frame_height, destination_rect);
         SDL_RenderDrawRect(renderer, &rectangle);
         int center_x = detection.x + detection.width / 2;
         int center_y = detection.y + detection.height / 2;
-        SDL_RenderDrawLine(renderer, center_x - 12, center_y, center_x + 12, center_y);
-        SDL_RenderDrawLine(renderer, center_x, center_y - 12, center_x, center_y + 12);
+        cv::Rect center_marker(center_x - 12, center_y - 12, 24, 24);
+        SDL_Rect mapped_center_marker = map_detection_to_destination(center_marker, frame_width, frame_height, destination_rect);
+        int mapped_center_x = mapped_center_marker.x + mapped_center_marker.w / 2;
+        int mapped_center_y = mapped_center_marker.y + mapped_center_marker.h / 2;
+        int marker_half_width = std::max(3, mapped_center_marker.w / 2);
+        int marker_half_height = std::max(3, mapped_center_marker.h / 2);
+        SDL_RenderDrawLine(renderer, mapped_center_x - marker_half_width, mapped_center_y, mapped_center_x + marker_half_width, mapped_center_y);
+        SDL_RenderDrawLine(renderer, mapped_center_x, mapped_center_y - marker_half_height, mapped_center_x, mapped_center_y + marker_half_height);
     }
 }
 
@@ -297,15 +344,6 @@ static bool handle_window_events(SDL_Window* window, bool* is_fullscreen)
     }
 
     return false;
-}
-
-static bool configure_renderer_coordinates(SDL_Renderer* renderer, int frame_width, int frame_height)
-{
-    if (SDL_RenderSetLogicalSize(renderer, frame_width, frame_height) != 0) {
-        fprintf(stderr, "Error: Could not set renderer logical size: %s\n", SDL_GetError());
-        return false;
-    }
-    return true;
 }
 
 void server_handle_frame(
@@ -386,9 +424,10 @@ void server_handle_frame(
         scaled_frame->linesize[1],
         scaled_frame->data[2],
         scaled_frame->linesize[2]);
+    SDL_Rect destination_rect = compute_video_destination_rect(renderer, window_width, window_height);
     SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
-    draw_inference_overlay(renderer, face_inference, 40, 220, 90);
+    SDL_RenderCopy(renderer, texture, NULL, &destination_rect);
+    draw_inference_overlay(renderer, face_inference, window_width, window_height, destination_rect, 40, 220, 90);
     SDL_RenderPresent(renderer);
 
     // Wait for DMA queue to be done
@@ -601,9 +640,6 @@ int video_server(
     apply_window_mode(window, fullscreen);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, 0);
     ERROR_CHECK_NULL("SDL_CreateRenderer", renderer);
-    if (!configure_renderer_coordinates(renderer, window_width, window_height)) {
-        return -1;
-    }
     SDL_Texture* texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_YV12,
@@ -793,10 +829,11 @@ int client_read_video_loop(
             scaled_frame->linesize[1],
             scaled_frame->data[2],
             scaled_frame->linesize[2]);
+        SDL_Rect destination_rect = compute_video_destination_rect(renderer, window_width, window_height);
         SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderCopy(renderer, texture, NULL, &destination_rect);
         run_hand_inference(hand_inference, scaled_frame, window_width, window_height);
-        draw_hand_overlay(renderer, hand_inference);
+        draw_hand_overlay(renderer, hand_inference, window_width, window_height, destination_rect);
         SDL_RenderPresent(renderer);
 
         // Control the frame rate of the video by delaying if
@@ -829,9 +866,6 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
     apply_window_mode(window, fullscreen);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, 0);
     ERROR_CHECK_NULL("SDL_CreateRenderer", renderer);
-    if (!configure_renderer_coordinates(renderer, window_width, window_height)) {
-        return -1;
-    }
     SDL_Texture* texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_YV12,
