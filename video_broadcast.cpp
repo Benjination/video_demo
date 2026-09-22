@@ -299,6 +299,15 @@ static bool handle_window_events(SDL_Window* window, bool* is_fullscreen)
     return false;
 }
 
+static bool configure_renderer_coordinates(SDL_Renderer* renderer, int frame_width, int frame_height)
+{
+    if (SDL_RenderSetLogicalSize(renderer, frame_width, frame_height) != 0) {
+        fprintf(stderr, "Error: Could not set renderer logical size: %s\n", SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
 void server_handle_frame(
     AVFrame* frame,
     AVFrame* scaled_frame,
@@ -592,6 +601,9 @@ int video_server(
     apply_window_mode(window, fullscreen);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, 0);
     ERROR_CHECK_NULL("SDL_CreateRenderer", renderer);
+    if (!configure_renderer_coordinates(renderer, window_width, window_height)) {
+        return -1;
+    }
     SDL_Texture* texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_YV12,
@@ -817,6 +829,9 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
     apply_window_mode(window, fullscreen);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, 0);
     ERROR_CHECK_NULL("SDL_CreateRenderer", renderer);
+    if (!configure_renderer_coordinates(renderer, window_width, window_height)) {
+        return -1;
+    }
     SDL_Texture* texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_YV12,
