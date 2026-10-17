@@ -10,7 +10,7 @@ OPENCV_LIBS = $(shell pkg-config --libs opencv4)
 
 INCLUDES = -I/opt/DIS/include -I/opt/DIS/include/dis -I/usr/include/ffmpeg/ $(OPENCV_CFLAGS)
 
-FLAGS = -lSDL2 -lavdevice -lavformat -lavcodec -lswscale -lavutil -lz -L/opt/DIS/lib64 -lsisci $(OPENCV_LIBS)
+FLAGS = -lSDL2 -lSDL2_ttf -lavdevice -lavformat -lavcodec -lswscale -lavutil -lz -L/opt/DIS/lib64 -lsisci $(OPENCV_LIBS)
 
 all: $(FILES)
 

@@ -1,4 +1,5 @@
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -97,6 +98,38 @@ struct HandInferenceOverlay {
     std::vector<cv::Point2f> anchors;
     uint32_t frame_count;
 };
+
+struct SpeedClientMetrics {
+    double current_gbps = 0.0;
+    double current_latency_ms = 0.0;
+    double smoothed_gbps = 0.0;
+    double smoothed_latency_ms = 0.0;
+    double max_gbps = 32.0;
+    uint64_t total_bytes_processed = 0;
+    uint64_t frames_processed = 0;
+    uint32_t last_ui_update_ms = 0;
+    uint32_t sample_start_ms = 0;
+    uint64_t sample_bytes = 0;
+    uint32_t sample_frames = 0;
+    double sample_latency_ms_total = 0.0;
+};
+
+static void update_speed_metrics(SpeedClientMetrics* metrics, double gpbs, double latency_ms, uint32_t now_ms)
+{
+    const double smoothing = 0.18;
+    if (metrics->frames_processed == 0) {
+        metrics->smoothed_gbps = gpbs;
+        metrics->smoothed_latency_ms = latency_ms;
+    } else {
+        metrics->smoothed_gbps = metrics->smoothed_gbps * (1.0 - smoothing) + gpbs * smoothing;
+        metrics->smoothed_latency_ms = metrics->smoothed_latency_ms * (1.0 - smoothing) + latency_ms * smoothing;
+    }
+    metrics->current_gbps = gpbs;
+    metrics->current_latency_ms = latency_ms;
+    metrics->frames_processed += 1;
+    metrics->max_gbps = std::max(metrics->max_gbps, gpbs);
+    metrics->last_ui_update_ms = now_ms;
+}
 
 static bool initialize_inference(InferenceOverlay* inference, const char* cascade_path, const char* inference_name)
 {
@@ -290,6 +323,101 @@ static void draw_hand_overlay(
         SDL_RenderDrawLine(renderer, mapped_center_x - marker_half_width, mapped_center_y, mapped_center_x + marker_half_width, mapped_center_y);
         SDL_RenderDrawLine(renderer, mapped_center_x, mapped_center_y - marker_half_height, mapped_center_x, mapped_center_y + marker_half_height);
     }
+}
+
+static TTF_Font* open_default_font(int size)
+{
+    static const char* font_candidates[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
+    };
+
+    for (const char* candidate : font_candidates) {
+        TTF_Font* font = TTF_OpenFont(candidate, size);
+        if (font != NULL) {
+            return font;
+        }
+    }
+    return NULL;
+}
+
+static void render_text(SDL_Renderer* renderer, TTF_Font* font, int x, int y, const std::string& text, SDL_Color color)
+{
+    if (font == NULL || renderer == NULL) {
+        return;
+    }
+
+    SDL_Surface* surface = TTF_RenderText_Blended(font, text.c_str(), color);
+    if (surface == NULL) {
+        return;
+    }
+
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+    if (texture != NULL) {
+        SDL_Rect dst_rect = { x, y, surface->w, surface->h };
+        SDL_RenderCopy(renderer, texture, NULL, &dst_rect);
+        SDL_DestroyTexture(texture);
+    }
+    SDL_FreeSurface(surface);
+}
+
+static void draw_speed_gauge(
+    SDL_Renderer* renderer,
+    TTF_Font* font,
+    const SpeedClientMetrics& metrics,
+    const SDL_Rect& video_rect)
+{
+    const int margin = 12;
+    const int panel_w = std::min(360, std::max(220, video_rect.w));
+    const int panel_h = 110;
+    const int panel_x = video_rect.x;
+    const int panel_y = video_rect.y + video_rect.h + margin;
+    const int gauge_x = panel_x + 18;
+    const int gauge_y = panel_y + 58;
+    const int gauge_w = panel_w - 36;
+    const int gauge_h = 18;
+
+    int outer_x = video_rect.x - 10;
+    int outer_y = video_rect.y - 10;
+    int outer_w = std::max(video_rect.w, panel_w) + 20;
+    int outer_h = video_rect.h + panel_h + margin + 20;
+
+    SDL_SetRenderDrawColor(renderer, 140, 160, 200, 255);
+    SDL_Rect outer = { outer_x, outer_y, outer_w, outer_h };
+    SDL_RenderDrawRect(renderer, &outer);
+
+    SDL_SetRenderDrawColor(renderer, 28, 28, 34, 210);
+    SDL_Rect panel = { panel_x, panel_y, panel_w, panel_h };
+    SDL_RenderFillRect(renderer, &panel);
+    SDL_SetRenderDrawColor(renderer, 126, 136, 170, 255);
+    SDL_RenderDrawRect(renderer, &panel);
+
+    SDL_SetRenderDrawColor(renderer, 40, 40, 48, 255);
+    SDL_Rect gauge_bg = { gauge_x, gauge_y, gauge_w, gauge_h };
+    SDL_RenderFillRect(renderer, &gauge_bg);
+
+    double fill_ratio = std::min(1.0, std::max(0.0, metrics.smoothed_gbps / std::max(0.01, metrics.max_gbps)));
+    int fill_width = (int)std::round(gauge_w * fill_ratio);
+    if (fill_width > 0) {
+        SDL_SetRenderDrawColor(renderer, 36, 210, 125, 255);
+        SDL_Rect gauge_fill = { gauge_x, gauge_y, fill_width, gauge_h };
+        SDL_RenderFillRect(renderer, &gauge_fill);
+    }
+
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_Rect border = { gauge_x, gauge_y, gauge_w, gauge_h };
+    SDL_RenderDrawRect(renderer, &border);
+
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "Multicast: %.3f GB/s", metrics.smoothed_gbps);
+    render_text(renderer, font, panel_x + 16, panel_y + 16, buffer, { 255, 255, 255, 255 });
+    snprintf(buffer, sizeof(buffer), "Gen4 target: %.0f GB/s", metrics.max_gbps);
+    render_text(renderer, font, panel_x + 16, panel_y + 38, buffer, { 220, 240, 255, 255 });
+    double utilization_pct = metrics.max_gbps > 0.0 ? (metrics.smoothed_gbps / metrics.max_gbps) * 100.0 : 0.0;
+    snprintf(buffer, sizeof(buffer), "Utilization: %.1f%%", utilization_pct);
+    render_text(renderer, font, panel_x + 16, panel_y + 82, buffer, { 180, 220, 255, 255 });
 }
 
 static void apply_window_mode(SDL_Window* window, bool fullscreen)
@@ -808,13 +936,17 @@ int client_read_video_loop(
     int window_width,
     int window_height,
     double frame_rate,
-    bool* is_fullscreen)
+    bool* is_fullscreen,
+    bool speed_client,
+    TTF_Font* speed_font)
 {
     uint32_t frame_interval_ms = 1e3 / frame_rate;
+    SpeedClientMetrics metrics;
 
     while (true) {
 
         uint32_t start_time_ms = SDL_GetTicks();
+        auto frame_start = std::chrono::steady_clock::now();
 
         if (handle_window_events(window, is_fullscreen)) {
             return 0;
@@ -829,11 +961,56 @@ int client_read_video_loop(
             scaled_frame->linesize[1],
             scaled_frame->data[2],
             scaled_frame->linesize[2]);
-        SDL_Rect destination_rect = compute_video_destination_rect(renderer, window_width, window_height);
+
+        SDL_Rect destination_rect;
+        if (speed_client) {
+            int metrics_panel_height = 110;
+            int margin = 18;
+            int max_video_height = std::max(200, window_height - metrics_panel_height - margin * 2);
+            float scale = std::min((float)(window_width - margin * 2) / window_width, (float)max_video_height / window_height);
+            int scaled_width = std::max(200, (int)std::round(window_width * scale));
+            int scaled_height = std::max(140, (int)std::round(window_height * scale));
+            destination_rect = { margin, margin, scaled_width, scaled_height };
+        } else {
+            destination_rect = compute_video_destination_rect(renderer, window_width, window_height);
+        }
+
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, &destination_rect);
+
         run_hand_inference(hand_inference, scaled_frame, window_width, window_height);
+        auto inference_end = std::chrono::steady_clock::now();
         draw_hand_overlay(renderer, hand_inference, window_width, window_height, destination_rect);
+
+        if (speed_client) {
+            uint32_t now_ms = SDL_GetTicks();
+            uint64_t frame_bytes = static_cast<uint64_t>(window_width) * static_cast<uint64_t>(window_height) * 3ULL / 2ULL;
+            double measured_latency_ms = std::chrono::duration<double, std::milli>(inference_end - frame_start).count();
+
+            if (metrics.sample_start_ms == 0) {
+                metrics.sample_start_ms = now_ms;
+            }
+            metrics.sample_bytes += frame_bytes;
+            metrics.sample_frames += 1;
+            metrics.sample_latency_ms_total += measured_latency_ms;
+            metrics.total_bytes_processed += frame_bytes;
+
+            if ((now_ms - metrics.last_ui_update_ms) >= 500) {
+                double window_elapsed_s = std::max(0.000001, (double)(now_ms - metrics.sample_start_ms) / 1000.0);
+                double observed_gbps = (double)metrics.sample_bytes / window_elapsed_s / 1.0e9;
+                double observed_latency_ms = metrics.sample_frames > 0 ? metrics.sample_latency_ms_total / metrics.sample_frames : 0.0;
+                observed_gbps = std::min(observed_gbps, 32.0);
+                update_speed_metrics(&metrics, observed_gbps, observed_latency_ms, now_ms);
+                metrics.sample_start_ms = now_ms;
+                metrics.sample_bytes = 0;
+                metrics.sample_frames = 0;
+                metrics.sample_latency_ms_total = 0.0;
+            }
+            if ((now_ms - metrics.last_ui_update_ms) < 500 || metrics.frames_processed == 0) {
+                draw_speed_gauge(renderer, speed_font, metrics, destination_rect);
+            }
+        }
+
         SDL_RenderPresent(renderer);
 
         // Control the frame rate of the video by delaying if
@@ -846,7 +1023,7 @@ int client_read_video_loop(
     }
 }
 
-int video_client(int window_width, int window_height, bool fullscreen, sci_desc_t sd, int multicast_group_id)
+int video_client(int window_width, int window_height, bool fullscreen, sci_desc_t sd, int multicast_group_id, bool speed_client)
 {
     int rc = 0;
     bool is_fullscreen = fullscreen;
@@ -855,8 +1032,9 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
 
     // Create the window and renderer
     Uint32 window_flags = SDL_WINDOW_SHOWN;
+    const char* window_title = speed_client ? "Video Broadcast Speed Client" : "Video Broadcast Client";
     SDL_Window* window = SDL_CreateWindow(
-        "Video Broadcast Client",
+        window_title,
         0,
         0,
         window_width,
@@ -873,6 +1051,11 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
         window_width,
         window_height);
     ERROR_CHECK_NULL("SDL_CreateTexture", texture);
+
+    TTF_Font* speed_font = speed_client ? open_default_font(18) : NULL;
+    if (speed_client && speed_font == NULL) {
+        fprintf(stderr, "Warning: Could not open a font for the speed overlay; continuing without text labels\n");
+    }
 
     HandInferenceOverlay hand_inference;
     if (!initialize_hand_inference(&hand_inference)) {
@@ -908,7 +1091,11 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
     int frame_rate = 60;
 
     // Enter loop which shows frames from the mapped memory area at the given frame rate
-    rc = client_read_video_loop(window, scaled_frame, renderer, texture, &hand_inference, window_width, window_height, frame_rate, &is_fullscreen);
+    rc = client_read_video_loop(window, scaled_frame, renderer, texture, &hand_inference, window_width, window_height, frame_rate, &is_fullscreen, speed_client, speed_font);
+
+    if (speed_font != NULL) {
+        TTF_CloseFont(speed_font);
+    }
 
     // Unmap and remove local segment
     SCIUnmapSegment(local_map, NO_FLAGS, &sisci_error);
@@ -942,9 +1129,10 @@ static void print_usage(void)
     printf(" video_broadcast -server -video <video_path> [-a <adapter_no>]\n");
     printf(" video_broadcast -server -camera <camera_device> [-a <adapter_no>]\n");
     printf(" video_broadcast -client [-a <adapter_no>]\n");
+    printf(" video_broadcast -speedClient [-a <adapter_no>]\n");
     printf("\n");
     printf("Arguments:\n");
-    printf(" -server / -client              : Whether this program should act as server or client\n");
+    printf(" -server / -client / -speedClient : Whether this program should act as server, client, or speed-monitor client\n");
     printf(" -video <video_path>            : Path to video file (one server input option)\n");
     printf(" -camera <camera_device>        : V4L2 camera device, e.g. /dev/video0 (one server input option)\n");
     printf(" -a <adapter_number>            : Adapter number, (when incorrect SCIPrepareSegment will fail among other things)\n");
@@ -982,6 +1170,7 @@ int main(int argc, char** argv)
     // Server input: a video file or a V4L2 camera device.
     bool input_set = false;
     bool camera_input = false;
+    bool speed_client_mode = false;
     char input_path[MAX_LEN_VIDEO_PATH] = NO_VIDEO;
 
     // Group id for this video
@@ -998,8 +1187,11 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        if (strcmp("-client", argv[counter]) == 0) {
+        if (strcmp("-client", argv[counter]) == 0 || strcmp("-speedClient", argv[counter]) == 0 || strcmp("-speedclient", argv[counter]) == 0 || strcmp("-speed-client", argv[counter]) == 0) {
             is_server = 0;
+            if (strcmp("-speedClient", argv[counter]) == 0 || strcmp("-speedclient", argv[counter]) == 0 || strcmp("-speed-client", argv[counter]) == 0) {
+                speed_client_mode = true;
+            }
             continue;
         }
 
@@ -1107,6 +1299,9 @@ int main(int argc, char** argv)
     sigaction(SIGINT, NULL, &action);
     error = SDL_Init(SDL_INIT_VIDEO);
     ERROR_CHECK_NOT_0("SDL_Init", error);
+    if (TTF_Init() != 0) {
+        fprintf(stderr, "Warning: SDL_ttf initialization failed: %s\n", TTF_GetError());
+    }
     // stop SDL from using sigint for other things than exiting the program
     sigaction(SIGINT, &action, NULL);
 
@@ -1117,13 +1312,14 @@ int main(int argc, char** argv)
     if (is_server) {
         video_server(window_width, window_height, fullscreen, input_path, camera_input, sd, multicast_group_id, use_dma);
     } else {
-        video_client(window_width, window_height, fullscreen, sd, multicast_group_id);
+        video_client(window_width, window_height, fullscreen, sd, multicast_group_id, speed_client_mode);
     }
 
     // Close sisci descriptor
     SCIClose(sd, NO_FLAGS, &sisci_error);
     SISCI_ERROR_CHECK("SCIClose", sisci_error);
 
+    TTF_Quit();
     SDL_Quit();
 
     SCITerminate();
