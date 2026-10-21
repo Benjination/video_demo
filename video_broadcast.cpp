@@ -81,13 +81,13 @@ extern "C" {
 // max sizes are used to avoid segfaults when the sizes do not match.
 // (Segment sizes can be increased in SISCI, but preallocation is quite conservative
 //  so by default they are just 16MiB)
-#define MAX_WINDOW_WIDTH 1280   
-#define MAX_WINDOW_HEIGHT 720
+#define MAX_WINDOW_WIDTH 1920
+#define MAX_WINDOW_HEIGHT 1080
 
-const int NUM_SIZE_PRESETS = 4;
+const int NUM_SIZE_PRESETS = 5;
 const int DEFAULT_WINDOW_SIZE_PRESET = 2;
-const int WINDOW_WIDTH_PRESETS[NUM_SIZE_PRESETS] = { 426, 640, 854, 1280 };
-const int WINDOW_HEIGHT_PRESETS[NUM_SIZE_PRESETS] = { 240, 360, 480, 720 };
+const int WINDOW_WIDTH_PRESETS[NUM_SIZE_PRESETS] = { 426, 640, 854, 1280, 1920 };
+const int WINDOW_HEIGHT_PRESETS[NUM_SIZE_PRESETS] = { 240, 360, 480, 720, 1080 };
 
 const char* FACE_CASCADE_PATH = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml";
 const char* PALM_MODEL_PATH = "models/palm_detection_mediapipe_2023feb.onnx";
@@ -1144,7 +1144,7 @@ int video_server(
     if (camera_input) {
         avdevice_register_all();
         av_dict_set(&input_options, "input_format", "mjpeg", 0);
-        av_dict_set(&input_options, "video_size", "1280x720", 0);
+        av_dict_set(&input_options, "video_size", "1920x1080", 0);
         av_dict_set(&input_options, "framerate", "30", 0);
     }
     const AVInputFormat* input_format = camera_input ? av_find_input_format("v4l2") : NULL;
@@ -1186,6 +1186,8 @@ int video_server(
     ERROR_CHECK_NEGATIVE("avcodec_parameters_to_context", error);
     error = avcodec_open2(codec_ctx, codec, NULL);
     ERROR_CHECK_NEGATIVE("avcodec_open2", error);
+    fprintf(stderr, "Input video: %dx%d; multicast output: %dx%d\n",
+        codec_ctx->width, codec_ctx->height, window_width, window_height);
 
     // Allocate memory for the output frame
     AVFrame* frame = av_frame_alloc();

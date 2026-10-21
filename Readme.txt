@@ -38,10 +38,11 @@ The video server multicasts a video using a given multicast group while simultan
 The server can use either an MP4 or another FFmpeg-supported video file with `-video`, or a V4L2 webcam device with `-camera`. For example:
 
 ```
-./video_broadcast -server -camera /dev/video0
+./video_broadcast -server -camera /dev/video0 -size 4
+./video_broadcast -speedClient -size 4
 ```
 
-Camera mode requests an MJPEG `1280x720` feed at 30 fps, which is supported by the default output frame size limits.
+The IC780 camera at `/dev/video0` supports MJPEG `1920x1080` at 30 fps. Camera mode requests that full-HD input. Preset `4` configures a `1920x1080` multicast output; use the same size on the server and client because the frame dimensions determine the SISCI segment size. The default remains preset `2` (`854x480`) for compatibility with existing lower-resolution sessions.
 
 Camera frames use the same raw-frame multicast buffer as file frames, so clients require no changes.
 
