@@ -191,6 +191,30 @@ static SDL_Rect map_detection_to_destination(const cv::Rect& detection, int fram
     return SDL_Rect { left, top, right - left, bottom - top };
 }
 
+static void draw_thick_rect(SDL_Renderer* renderer, const SDL_Rect& rect, uint8_t red, uint8_t green, uint8_t blue)
+{
+    const int thickness = 8;
+    const int outline = 3;
+    Uint8 old_r, old_g, old_b, old_a;
+    SDL_GetRenderDrawColor(renderer, &old_r, &old_g, &old_b, &old_a);
+    // Dark outline on both sides so the box stays visible on any background.
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
+    for (int i = -outline; i < 0; ++i) {
+        SDL_Rect r { rect.x + i, rect.y + i, rect.w - 2 * i, rect.h - 2 * i };
+        SDL_RenderDrawRect(renderer, &r);
+    }
+    for (int i = thickness; i < thickness + outline; ++i) {
+        SDL_Rect r { rect.x + i, rect.y + i, rect.w - 2 * i, rect.h - 2 * i };
+        if (r.w > 0 && r.h > 0) SDL_RenderDrawRect(renderer, &r);
+    }
+    SDL_SetRenderDrawColor(renderer, red, green, blue, SDL_ALPHA_OPAQUE);
+    for (int i = 0; i < thickness; ++i) {
+        SDL_Rect r { rect.x + i, rect.y + i, rect.w - 2 * i, rect.h - 2 * i };
+        if (r.w > 0 && r.h > 0) SDL_RenderDrawRect(renderer, &r);
+    }
+    SDL_SetRenderDrawColor(renderer, old_r, old_g, old_b, old_a);
+}
+
 static void draw_inference_overlay(
     SDL_Renderer* renderer,
     const InferenceOverlay* inference,
@@ -204,7 +228,7 @@ static void draw_inference_overlay(
     SDL_SetRenderDrawColor(renderer, red, green, blue, SDL_ALPHA_OPAQUE);
     for (const cv::Rect& detection : inference->detections) {
         SDL_Rect rectangle = map_detection_to_destination(detection, frame_width, frame_height, destination_rect);
-        SDL_RenderDrawRect(renderer, &rectangle);
+        draw_thick_rect(renderer, rectangle, red, green, blue);
     }
 }
 
@@ -311,7 +335,7 @@ static void draw_hand_overlay(
     SDL_SetRenderDrawColor(renderer, 30, 210, 240, SDL_ALPHA_OPAQUE);
     for (const cv::Rect& detection : inference->detections) {
         SDL_Rect rectangle = map_detection_to_destination(detection, frame_width, frame_height, destination_rect);
-        SDL_RenderDrawRect(renderer, &rectangle);
+        draw_thick_rect(renderer, rectangle, 30, 210, 240);
         int center_x = detection.x + detection.width / 2;
         int center_y = detection.y + detection.height / 2;
         cv::Rect center_marker(center_x - 12, center_y - 12, 24, 24);
