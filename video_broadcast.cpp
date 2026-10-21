@@ -106,6 +106,7 @@ bool print_frame_status = false;
 struct InferenceOverlay {
     cv::CascadeClassifier cascade;
     std::vector<cv::Rect> detections;
+    std::vector<cv::Rect> previous_candidates;
     uint32_t frame_count;
 };
 
@@ -196,14 +197,27 @@ static void run_inference(InferenceOverlay* inference, AVFrame* frame, int windo
     cv::Mat grayscale_frame;
     cv::cvtColor(yuv_frame, bgr_frame, cv::COLOR_YUV2BGR_I420);
     cv::cvtColor(bgr_frame, grayscale_frame, cv::COLOR_BGR2GRAY);
-    cv::Mat original_grayscale_frame = grayscale_frame.clone();
     cv::equalizeHist(grayscale_frame, grayscale_frame);
-    inference->cascade.detectMultiScale(grayscale_frame, inference->detections, 1.1, 3, 0, cv::Size(24, 24));
+    // High minNeighbors and a larger minimum size suppress most false positives.
+    constexpr int MIN_NEIGHBORS = 7;
+    const int min_face = std::max(60, window_height / 8);
+    std::vector<cv::Rect> candidates;
+    inference->cascade.detectMultiScale(grayscale_frame, candidates, 1.1, MIN_NEIGHBORS, 0, cv::Size(min_face, min_face));
 
-    // Fall back to raw grayscale if histogram equalization hurt detection.
-    if (inference->detections.empty()) {
-        inference->cascade.detectMultiScale(original_grayscale_frame, inference->detections, 1.1, 3, 0, cv::Size(24, 24));
+    // Only show a box if it was also found (overlapping) in the previous pass, to stop flashing.
+    std::vector<cv::Rect> confirmed;
+    for (const cv::Rect& candidate : candidates) {
+        for (const cv::Rect& previous : inference->previous_candidates) {
+            double overlap = (double)(candidate & previous).area();
+            double combined = (double)(candidate | previous).area();
+            if (combined > 0 && overlap / combined > 0.3) {
+                confirmed.push_back(candidate);
+                break;
+            }
+        }
     }
+    inference->previous_candidates = candidates;
+    inference->detections = confirmed;
 }
 
 static SDL_Rect compute_video_destination_rect(SDL_Renderer* renderer, int frame_width, int frame_height)
