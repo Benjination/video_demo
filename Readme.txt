@@ -57,6 +57,12 @@ Ubuntu dependencies:
 sudo apt install libopencv-dev opencv-data
 ```
 
+## Badge QR reader
+
+The `-speedClient` mode scans the received video for QR codes and shows newly scanned payloads beside the video. Each unique payload is saved as a JSON file under `badges/visible/`; clicking **Clear / Archive** moves the visible JSON records to `badges/stored/`. Existing records are loaded when the speed client starts. Repeated frames showing a badge do not create duplicate records. Use the mouse wheel to scroll the visible badge list.
+
+QR payloads are saved as-is; the reader does not open links or infer contact details. Treat the saved files as personal information and keep them private.
+
 ## Other considerations:
 
 Sometimes SDL will struggle to access the screen when running as `root` on the computer, to solve this, try running it as a user instead.
@@ -64,4 +70,3 @@ Sometimes SDL will struggle to access the screen when running as `root` on the c
 When you access the computer using ssh, X-forwarding will need to be used to get the output of the screen from the remote computer to your local computer.
 
 If SCIPrepareSegment fails, the reason is typically that the wrong adapter is specified. The default is 0 and it can be changed with the `-a` parameter.
-

@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <algorithm>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,6 +11,14 @@
 
 #include <chrono>
 #include <cmath>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iterator>
+#include <set>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -112,6 +121,25 @@ struct SpeedClientMetrics {
     uint64_t sample_bytes = 0;
     uint32_t sample_frames = 0;
     double sample_latency_ms_total = 0.0;
+};
+
+struct BadgeRecord {
+    std::string filename;
+    std::string payload;
+    std::string scanned_at;
+};
+
+struct BadgeStore {
+    std::filesystem::path visible_directory = "badges/visible";
+    std::filesystem::path stored_directory = "badges/stored";
+    std::vector<BadgeRecord> visible_records;
+    std::set<std::string> known_payloads;
+};
+
+struct SpeedClientLayout {
+    SDL_Rect video;
+    SDL_Rect badge_panel;
+    SDL_Rect clear_button;
 };
 
 static void update_speed_metrics(SpeedClientMetrics* metrics, double gpbs, double latency_ms, uint32_t now_ms)
@@ -387,6 +415,366 @@ static void render_text(SDL_Renderer* renderer, TTF_Font* font, int x, int y, co
     SDL_FreeSurface(surface);
 }
 
+static std::string json_escape(const std::string& value)
+{
+    std::ostringstream escaped;
+    for (unsigned char character : value) {
+        switch (character) {
+        case '"':
+            escaped << "\\\"";
+            break;
+        case '\\':
+            escaped << "\\\\";
+            break;
+        case '\b':
+            escaped << "\\b";
+            break;
+        case '\f':
+            escaped << "\\f";
+            break;
+        case '\n':
+            escaped << "\\n";
+            break;
+        case '\r':
+            escaped << "\\r";
+            break;
+        case '\t':
+            escaped << "\\t";
+            break;
+        default:
+            if (character < 0x20) {
+                escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(character) << std::dec;
+            } else {
+                escaped << static_cast<char>(character);
+            }
+        }
+    }
+    return escaped.str();
+}
+
+static bool read_json_string(const std::string& json, const std::string& key, std::string* value)
+{
+    const std::string marker = "\"" + key + "\"";
+    size_t position = json.find(marker);
+    if (position == std::string::npos || (position = json.find(':', position + marker.size())) == std::string::npos) {
+        return false;
+    }
+    position = json.find('"', position + 1);
+    if (position == std::string::npos) {
+        return false;
+    }
+
+    value->clear();
+    for (++position; position < json.size(); ++position) {
+        char character = json[position];
+        if (character == '"') {
+            return true;
+        }
+        if (character != '\\') {
+            value->push_back(character);
+            continue;
+        }
+        if (++position >= json.size()) {
+            return false;
+        }
+        switch (json[position]) {
+        case '"': value->push_back('"'); break;
+        case '\\': value->push_back('\\'); break;
+        case '/': value->push_back('/'); break;
+        case 'b': value->push_back('\b'); break;
+        case 'f': value->push_back('\f'); break;
+        case 'n': value->push_back('\n'); break;
+        case 'r': value->push_back('\r'); break;
+        case 't': value->push_back('\t'); break;
+        case 'u': {
+            if (position + 4 >= json.size() || json.compare(position + 1, 2, "00") != 0) {
+                return false;
+            }
+            char high = json[position + 3];
+            char low = json[position + 4];
+            auto hex_value = [](char digit) -> int {
+                if (digit >= '0' && digit <= '9') return digit - '0';
+                if (digit >= 'a' && digit <= 'f') return digit - 'a' + 10;
+                if (digit >= 'A' && digit <= 'F') return digit - 'A' + 10;
+                return -1;
+            };
+            int high_value = hex_value(high);
+            int low_value = hex_value(low);
+            if (high_value < 0 || low_value < 0) {
+                return false;
+            }
+            value->push_back(static_cast<char>((high_value << 4) | low_value));
+            position += 4;
+            break;
+        }
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool load_badge_directory(
+    const std::filesystem::path& directory,
+    std::vector<BadgeRecord>* records,
+    std::set<std::string>* known_payloads)
+{
+    std::error_code error;
+    if (!std::filesystem::exists(directory, error)) {
+        if (error) {
+            fprintf(stderr, "Could not inspect badge directory %s: %s\n", directory.c_str(), error.message().c_str());
+            return false;
+        }
+        return true;
+    }
+
+    std::filesystem::directory_iterator entry(directory, error);
+    if (error) {
+        fprintf(stderr, "Could not read badge directory %s: %s\n", directory.c_str(), error.message().c_str());
+        return false;
+    }
+    for (const auto& file : entry) {
+        if (!file.is_regular_file(error) || error || file.path().extension() != ".json") {
+            error.clear();
+            continue;
+        }
+        std::ifstream input(file.path());
+        if (!input) {
+            fprintf(stderr, "Could not read badge record %s\n", file.path().c_str());
+            continue;
+        }
+        std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        BadgeRecord record;
+        record.filename = file.path().filename().string();
+        if (!read_json_string(json, "payload", &record.payload) || record.payload.empty()) {
+            fprintf(stderr, "Ignoring invalid badge JSON %s\n", file.path().c_str());
+            continue;
+        }
+        read_json_string(json, "scanned_at", &record.scanned_at);
+        known_payloads->insert(record.payload);
+        if (records != NULL) {
+            records->push_back(record);
+        }
+    }
+    return true;
+}
+
+static bool initialize_badge_store(BadgeStore* store)
+{
+    std::error_code error;
+    std::filesystem::create_directories(store->visible_directory, error);
+    if (error) {
+        fprintf(stderr, "Could not create %s: %s\n", store->visible_directory.c_str(), error.message().c_str());
+        return false;
+    }
+    std::filesystem::create_directories(store->stored_directory, error);
+    if (error) {
+        fprintf(stderr, "Could not create %s: %s\n", store->stored_directory.c_str(), error.message().c_str());
+        return false;
+    }
+    if (!load_badge_directory(store->visible_directory, &store->visible_records, &store->known_payloads) ||
+        !load_badge_directory(store->stored_directory, NULL, &store->known_payloads)) {
+        return false;
+    }
+    std::sort(store->visible_records.begin(), store->visible_records.end(),
+        [](const BadgeRecord& left, const BadgeRecord& right) { return left.filename < right.filename; });
+    return true;
+}
+
+static std::string current_timestamp()
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time;
+    localtime_r(&time, &local_time);
+    std::ostringstream timestamp;
+    timestamp << std::put_time(&local_time, "%Y-%m-%dT%H:%M:%S")
+              << '.' << std::setw(3) << std::setfill('0') << milliseconds.count();
+    return timestamp.str();
+}
+
+static bool save_badge(BadgeStore* store, const std::string& payload)
+{
+    if (payload.empty() || store->known_payloads.count(payload) != 0) {
+        return true;
+    }
+    const std::string scanned_at = current_timestamp();
+    const auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::string filename = "badge_" + std::to_string(epoch_ms) + ".json";
+    const std::filesystem::path path = store->visible_directory / filename;
+    std::ofstream output(path);
+    if (!output) {
+        fprintf(stderr, "Could not create badge record %s\n", path.c_str());
+        return false;
+    }
+    output << "{\n  \"scanned_at\": \"" << json_escape(scanned_at)
+           << "\",\n  \"payload\": \"" << json_escape(payload) << "\"\n}\n";
+    output.close();
+    if (!output) {
+        fprintf(stderr, "Could not finish writing badge record %s\n", path.c_str());
+        return false;
+    }
+    store->visible_records.push_back({ filename, payload, scanned_at });
+    store->known_payloads.insert(payload);
+    fprintf(stderr, "Saved badge QR payload to %s\n", path.c_str());
+    return true;
+}
+
+static void archive_visible_badges(BadgeStore* store)
+{
+    std::vector<BadgeRecord> remaining;
+    for (const BadgeRecord& record : store->visible_records) {
+        const std::filesystem::path source = store->visible_directory / record.filename;
+        const std::filesystem::path destination = store->stored_directory / record.filename;
+        std::error_code error;
+        std::filesystem::rename(source, destination, error);
+        if (error) {
+            fprintf(stderr, "Could not archive badge record %s: %s\n", source.c_str(), error.message().c_str());
+            remaining.push_back(record);
+        }
+    }
+    store->visible_records.swap(remaining);
+}
+
+static SpeedClientLayout compute_speed_client_layout(int output_width, int output_height, int frame_width, int frame_height)
+{
+    const int margin = 18;
+    const int gap = 22;
+    const int panel_width = std::min(std::max(250, output_width / 3), std::max(250, output_width - 2 * margin));
+    const int panel_x = output_width - margin - panel_width;
+    const int video_area_width = std::max(1, panel_x - gap - margin);
+    const int video_area_height = std::max(1, output_height - 180);
+    const float scale = std::min(
+        static_cast<float>(video_area_width) / frame_width,
+        static_cast<float>(video_area_height) / frame_height);
+    const int video_width = std::max(1, static_cast<int>(std::round(frame_width * scale)));
+    const int video_height = std::max(1, static_cast<int>(std::round(frame_height * scale)));
+    SpeedClientLayout layout;
+    layout.video = { margin + (video_area_width - video_width) / 2, margin, video_width, video_height };
+    layout.badge_panel = { panel_x, margin, panel_width, std::max(1, output_height - 2 * margin) };
+    layout.clear_button = { panel_x + 12, output_height - margin - 54, panel_width - 24, 42 };
+    return layout;
+}
+
+static int render_wrapped_text(
+    SDL_Renderer* renderer,
+    TTF_Font* font,
+    int x,
+    int y,
+    int max_width,
+    const std::string& text,
+    SDL_Color color)
+{
+    if (font == NULL || text.empty()) {
+        return 0;
+    }
+    int line_height = TTF_FontLineSkip(font);
+    std::istringstream words(text);
+    std::string word;
+    std::string line;
+    int lines = 0;
+    while (words >> word) {
+        std::string candidate = line.empty() ? word : line + " " + word;
+        int candidate_width = 0;
+        TTF_SizeUTF8(font, candidate.c_str(), &candidate_width, NULL);
+        if (!line.empty() && candidate_width > max_width) {
+            render_text(renderer, font, x, y + lines * line_height, line, color);
+            ++lines;
+            line = word;
+        } else {
+            line = candidate;
+        }
+    }
+    if (!line.empty()) {
+        render_text(renderer, font, x, y + lines * line_height, line, color);
+        ++lines;
+    }
+    return lines * line_height;
+}
+
+static SDL_Rect draw_badge_panel(
+    SDL_Renderer* renderer,
+    TTF_Font* font,
+    const BadgeStore& store,
+    const SpeedClientLayout& layout,
+    size_t scroll_offset)
+{
+    SDL_SetRenderDrawColor(renderer, 24, 28, 36, 255);
+    SDL_RenderFillRect(renderer, &layout.badge_panel);
+    SDL_SetRenderDrawColor(renderer, 110, 125, 150, 255);
+    SDL_RenderDrawRect(renderer, &layout.badge_panel);
+
+    const int left = layout.badge_panel.x + 14;
+    const int content_width = layout.badge_panel.w - 28;
+    int y = layout.badge_panel.y + 14;
+    render_text(renderer, font, left, y,
+        "Visible badges (" + std::to_string(store.visible_records.size()) + ")",
+        { 255, 255, 255, 255 });
+    y += font != NULL ? TTF_FontLineSkip(font) + 10 : 30;
+
+    SDL_Rect list_clip = {
+        layout.badge_panel.x + 1,
+        y,
+        layout.badge_panel.w - 2,
+        std::max(0, layout.clear_button.y - y - 8)
+    };
+    SDL_RenderSetClipRect(renderer, &list_clip);
+    for (size_t offset = scroll_offset; offset < store.visible_records.size() && y < list_clip.y + list_clip.h; ++offset) {
+        const BadgeRecord& record = store.visible_records[store.visible_records.size() - 1 - offset];
+        SDL_SetRenderDrawColor(renderer, 55, 63, 76, 255);
+        SDL_Rect card = { left - 6, y, content_width + 12, 4 };
+        SDL_RenderFillRect(renderer, &card);
+        y += 10;
+        int payload_height = 0;
+        size_t field_start = 0;
+        while (field_start <= record.payload.size()) {
+            size_t field_end = record.payload.find('~', field_start);
+            const std::string field = record.payload.substr(
+                field_start, field_end == std::string::npos ? std::string::npos : field_end - field_start);
+            payload_height += render_wrapped_text(
+                renderer, font, left, y + payload_height, content_width, field, { 220, 230, 245, 255 });
+            if (field_end == std::string::npos) {
+                break;
+            }
+            field_start = field_end + 1;
+        }
+        y += std::max(payload_height, font != NULL ? TTF_FontLineSkip(font) : 20) + 10;
+    }
+    SDL_RenderSetClipRect(renderer, NULL);
+
+    SDL_SetRenderDrawColor(renderer, 165, 54, 54, 255);
+    SDL_RenderFillRect(renderer, &layout.clear_button);
+    SDL_SetRenderDrawColor(renderer, 255, 215, 215, 255);
+    SDL_RenderDrawRect(renderer, &layout.clear_button);
+    const std::string button_text = "Clear / Archive";
+    int text_width = 0;
+    int text_height = 0;
+    if (font != NULL && TTF_SizeUTF8(font, button_text.c_str(), &text_width, &text_height) == 0) {
+        render_text(renderer, font,
+            layout.clear_button.x + (layout.clear_button.w - text_width) / 2,
+            layout.clear_button.y + (layout.clear_button.h - text_height) / 2,
+            button_text, { 255, 255, 255, 255 });
+    }
+    return layout.clear_button;
+}
+
+static void scan_badge_qr(
+    cv::QRCodeDetector* detector,
+    BadgeStore* store,
+    AVFrame* frame,
+    int frame_width,
+    int frame_height)
+{
+    cv::Mat grayscale(frame_height, frame_width, CV_8UC1, frame->data[0], frame->linesize[0]);
+    std::string payload = detector->detectAndDecode(grayscale);
+    if (!payload.empty()) {
+        save_badge(store, payload);
+    }
+}
+
 static void draw_speed_gauge(
     SDL_Renderer* renderer,
     TTF_Font* font,
@@ -466,7 +854,13 @@ static bool set_fullscreen(SDL_Window* window, bool fullscreen)
     return true;
 }
 
-static bool handle_window_events(SDL_Window* window, bool* is_fullscreen)
+static bool handle_window_events(
+    SDL_Window* window,
+    bool* is_fullscreen,
+    const SDL_Rect* clear_button = NULL,
+    bool* clear_requested = NULL,
+    size_t* badge_scroll = NULL,
+    size_t badge_count = 0)
 {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -490,6 +884,24 @@ static bool handle_window_events(SDL_Window* window, bool* is_fullscreen)
             } else if (key == SDLK_ESCAPE && *is_fullscreen) {
                 if (set_fullscreen(window, false)) {
                     *is_fullscreen = false;
+                }
+            }
+
+            if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT &&
+                clear_button != NULL && clear_requested != NULL) {
+                const int x = event.button.x;
+                const int y = event.button.y;
+                if (x >= clear_button->x && x < clear_button->x + clear_button->w &&
+                    y >= clear_button->y && y < clear_button->y + clear_button->h) {
+                    *clear_requested = true;
+                }
+            }
+
+            if (event.type == SDL_MOUSEWHEEL && badge_scroll != NULL) {
+                if (event.wheel.y > 0 && *badge_scroll > 0) {
+                    --(*badge_scroll);
+                } else if (event.wheel.y < 0 && *badge_scroll + 1 < badge_count) {
+                    ++(*badge_scroll);
                 }
             }
         }
@@ -966,14 +1378,41 @@ int client_read_video_loop(
 {
     uint32_t frame_interval_ms = 1e3 / frame_rate;
     SpeedClientMetrics metrics;
+    BadgeStore badge_store;
+    cv::QRCodeDetector qr_detector;
+    if (speed_client && !initialize_badge_store(&badge_store)) {
+        return 1;
+    }
+    uint32_t last_qr_scan_ms = 0;
+    size_t badge_scroll = 0;
 
     while (true) {
 
         uint32_t start_time_ms = SDL_GetTicks();
         auto frame_start = std::chrono::steady_clock::now();
+        SpeedClientLayout layout = {};
+        SDL_Rect clear_button = {};
+        if (speed_client) {
+            int output_width = window_width;
+            int output_height = window_height;
+            SDL_GetRendererOutputSize(renderer, &output_width, &output_height);
+            layout = compute_speed_client_layout(output_width, output_height, window_width, window_height);
+            clear_button = layout.clear_button;
+        }
+        bool clear_requested = false;
 
-        if (handle_window_events(window, is_fullscreen)) {
+        if (handle_window_events(
+                window,
+                is_fullscreen,
+                speed_client ? &clear_button : NULL,
+                speed_client ? &clear_requested : NULL,
+                speed_client ? &badge_scroll : NULL,
+                badge_store.visible_records.size())) {
             return 0;
+        }
+        if (clear_requested) {
+            archive_visible_badges(&badge_store);
+            badge_scroll = 0;
         }
 
         SDL_UpdateYUVTexture(
@@ -988,13 +1427,7 @@ int client_read_video_loop(
 
         SDL_Rect destination_rect;
         if (speed_client) {
-            int metrics_panel_height = 110;
-            int margin = 18;
-            int max_video_height = std::max(200, window_height - metrics_panel_height - margin * 2);
-            float scale = std::min((float)(window_width - margin * 2) / window_width, (float)max_video_height / window_height);
-            int scaled_width = std::max(200, (int)std::round(window_width * scale));
-            int scaled_height = std::max(140, (int)std::round(window_height * scale));
-            destination_rect = { margin, margin, scaled_width, scaled_height };
+            destination_rect = layout.video;
         } else {
             destination_rect = compute_video_destination_rect(renderer, window_width, window_height);
         }
@@ -1008,6 +1441,13 @@ int client_read_video_loop(
 
         if (speed_client) {
             uint32_t now_ms = SDL_GetTicks();
+            if (last_qr_scan_ms == 0 || now_ms - last_qr_scan_ms >= 300) {
+                scan_badge_qr(&qr_detector, &badge_store, scaled_frame, window_width, window_height);
+                last_qr_scan_ms = now_ms;
+                badge_scroll = badge_store.visible_records.empty()
+                    ? 0
+                    : std::min(badge_scroll, badge_store.visible_records.size() - 1);
+            }
             uint64_t frame_bytes = static_cast<uint64_t>(window_width) * static_cast<uint64_t>(window_height) * 3ULL / 2ULL;
             double measured_latency_ms = std::chrono::duration<double, std::milli>(inference_end - frame_start).count();
 
@@ -1033,6 +1473,7 @@ int client_read_video_loop(
             if ((now_ms - metrics.last_ui_update_ms) < 500 || metrics.frames_processed == 0) {
                 draw_speed_gauge(renderer, speed_font, metrics, destination_rect);
             }
+            draw_badge_panel(renderer, speed_font, badge_store, layout, badge_scroll);
         }
 
         SDL_RenderPresent(renderer);

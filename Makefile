@@ -18,7 +18,7 @@ video_broadcast: video_broadcast.o
 	g++ $< -o $@ $(FLAGS)
 
 %.o: %.cpp
-	g++ $(WARNINGS) $(INCLUDES) -D_REENTRANT -c $< -o $@
+	g++ -std=c++17 $(WARNINGS) $(INCLUDES) -D_REENTRANT -c $< -o $@
 
 clean:
 	rm -f $(FILES) *.o
