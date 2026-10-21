@@ -1595,6 +1595,7 @@ int client_read_video_loop(
     SDL_Renderer* renderer,
     SDL_Texture* texture,
     HandInferenceOverlay* hand_inference,
+    InferenceOverlay* face_inference,
     int window_width,
     int window_height,
     double frame_rate,
@@ -1668,8 +1669,10 @@ int client_read_video_loop(
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, &destination_rect);
 
+        run_inference(face_inference, scaled_frame, window_width, window_height);
         run_hand_inference(hand_inference, scaled_frame, window_width, window_height);
         auto inference_end = std::chrono::steady_clock::now();
+        draw_inference_overlay(renderer, face_inference, window_width, window_height, destination_rect, 40, 220, 90);
         draw_hand_overlay(renderer, hand_inference, window_width, window_height, destination_rect);
 
         if (speed_client) {
@@ -1772,6 +1775,11 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
         return -1;
     }
 
+    InferenceOverlay face_inference;
+    if (!initialize_inference(&face_inference, FACE_CASCADE_PATH, "face detection")) {
+        return -1;
+    }
+
     // Allocate a buffer for the scaled frame data
     // size_t buffer_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, window_width, window_height, 1);
     size_t buffer_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT, 1);
@@ -1801,7 +1809,7 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
     int frame_rate = 60;
 
     // Enter loop which shows frames from the mapped memory area at the given frame rate
-    rc = client_read_video_loop(window, scaled_frame, renderer, texture, &hand_inference, window_width, window_height, frame_rate, &is_fullscreen, speed_client, speed_font);
+    rc = client_read_video_loop(window, scaled_frame, renderer, texture, &hand_inference, &face_inference, window_width, window_height, frame_rate, &is_fullscreen, speed_client, speed_font);
 
     if (speed_font != NULL) {
         TTF_CloseFont(speed_font);
