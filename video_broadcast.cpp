@@ -1088,7 +1088,9 @@ static bool handle_window_events(
                     *is_fullscreen = false;
                 }
             }
+        }
 
+        {
             if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT &&
                 clear_button != NULL && clear_requested != NULL) {
                 const int x = event.button.x;
