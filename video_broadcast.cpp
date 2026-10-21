@@ -25,6 +25,7 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/objdetect.hpp>
+#include <opencv2/wechat_qrcode.hpp>
 
 #include "sisci_api.h"
 #include "sisci_error.h"
@@ -762,16 +763,25 @@ static SDL_Rect draw_badge_panel(
     return layout.clear_button;
 }
 
+// The WeChat decoder finds small or soft QR codes that the basic OpenCV decoder misses,
+// so it is tried first with the basic decoder as a fallback.
 static void scan_badge_qr(
-    cv::QRCodeDetector* detector,
+    cv::wechat_qrcode::WeChatQRCode* detector,
+    cv::QRCodeDetector* fallback_detector,
     BadgeStore* store,
     AVFrame* frame,
     int frame_width,
     int frame_height)
 {
     cv::Mat grayscale(frame_height, frame_width, CV_8UC1, frame->data[0], frame->linesize[0]);
-    std::string payload = detector->detectAndDecode(grayscale);
-    if (!payload.empty()) {
+    std::vector<std::string> payloads = detector->detectAndDecode(grayscale);
+    if (payloads.empty()) {
+        std::string payload = fallback_detector->detectAndDecode(grayscale);
+        if (!payload.empty()) {
+            payloads.push_back(payload);
+        }
+    }
+    for (const std::string& payload : payloads) {
         save_badge(store, payload);
     }
 }
@@ -1382,7 +1392,8 @@ int client_read_video_loop(
     uint32_t frame_interval_ms = 1e3 / frame_rate;
     SpeedClientMetrics metrics;
     BadgeStore badge_store;
-    cv::QRCodeDetector qr_detector;
+    cv::wechat_qrcode::WeChatQRCode qr_detector;
+    cv::QRCodeDetector fallback_qr_detector;
     if (speed_client && !initialize_badge_store(&badge_store)) {
         return 1;
     }
@@ -1445,7 +1456,7 @@ int client_read_video_loop(
         if (speed_client) {
             uint32_t now_ms = SDL_GetTicks();
             if (last_qr_scan_ms == 0 || now_ms - last_qr_scan_ms >= 300) {
-                scan_badge_qr(&qr_detector, &badge_store, scaled_frame, window_width, window_height);
+                scan_badge_qr(&qr_detector, &fallback_qr_detector, &badge_store, scaled_frame, window_width, window_height);
                 last_qr_scan_ms = now_ms;
                 badge_scroll = badge_store.visible_records.empty()
                     ? 0
