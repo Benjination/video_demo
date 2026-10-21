@@ -860,6 +860,26 @@ static bool parse_badge_lines(std::vector<OcrLine> lines, BadgeInfo* info)
 
 // Tesseract is slow relative to the video frame rate, so it runs on its own thread
 // and works on one grayscale frame at a time.
+// Tolerates a character or two of OCR noise so consecutive reads of the same badge still agree.
+static bool keys_similar(const std::string& a, const std::string& b)
+{
+    if (a.empty() || b.empty()) {
+        return false;
+    }
+    std::vector<size_t> previous(b.size() + 1), current(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j) {
+        previous[j] = j;
+    }
+    for (size_t i = 1; i <= a.size(); ++i) {
+        current[0] = i;
+        for (size_t j = 1; j <= b.size(); ++j) {
+            current[j] = std::min({ previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1) });
+        }
+        previous.swap(current);
+    }
+    return previous[b.size()] <= std::max<size_t>(2, a.size() / 12);
+}
+
 class BadgeOcrWorker {
 public:
     BadgeOcrWorker()
@@ -1593,7 +1613,6 @@ int client_read_video_loop(
     if (speed_client) {
         ocr_worker.reset(new BadgeOcrWorker());
     }
-    uint32_t last_ocr_ms = 0;
     std::string pending_key;
     int pending_count = 0;
     // A badge must be read identically this many times in a row before it is saved,
@@ -1659,7 +1678,7 @@ int client_read_video_loop(
             BadgeInfo badge_info;
             if (ocr_worker->enabled() && ocr_worker->take_result(&badge_found, &badge_info)) {
                 const std::string key = badge_found ? badge_key(badge_info) : std::string();
-                pending_count = (!key.empty() && key == pending_key) ? pending_count + 1 : (key.empty() ? 0 : 1);
+                pending_count = (!key.empty() && keys_similar(key, pending_key)) ? pending_count + 1 : (key.empty() ? 0 : 1);
                 pending_key = key;
                 if (pending_count >= required_matches) {
                     save_badge(&badge_store, badge_info);
@@ -1667,10 +1686,9 @@ int client_read_video_loop(
                     pending_key.clear();
                 }
             }
-            if (ocr_worker->enabled() && ocr_worker->idle() && (last_ocr_ms == 0 || now_ms - last_ocr_ms >= 500)) {
+            if (ocr_worker->enabled() && ocr_worker->idle()) {
                 cv::Mat luma(window_height, window_width, CV_8UC1, scaled_frame->data[0], scaled_frame->linesize[0]);
                 ocr_worker->submit(luma);
-                last_ocr_ms = now_ms;
             }
             badge_scroll = badge_store.visible_records.empty()
                 ? 0
