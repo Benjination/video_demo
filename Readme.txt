@@ -38,8 +38,8 @@ The video server multicasts a video using a given multicast group while simultan
 The server can use either an MP4 or another FFmpeg-supported video file with `-video`, or a V4L2 webcam device with `-camera`. For example:
 
 ```
-./video_broadcast -server -camera /dev/video0 -size 4
-./video_broadcast -speedClient -size 4
+./video_broadcast -server -camera /dev/video0
+./video_broadcast -speedClient
 ```
 
 The IC780 camera at `/dev/video0` supports MJPEG `1920x1080` at 30 fps. Camera mode requests that full-HD input and scales it to the multicast output size. Preset `4` is `1536x864`, the largest 16:9 frame that fits in SISCI's 2 MiB segment limit on this system (a full `1920x1080` frame needs about 3.1 MB and makes segment creation fail with `Out of local resources`). Use the same size on the server and client. The default remains preset `2` (`854x480`) for compatibility with existing lower-resolution sessions.
@@ -58,11 +58,19 @@ Ubuntu dependencies:
 sudo apt install libopencv-dev opencv-data
 ```
 
-## Badge QR reader
+## Badge text reader
 
-The `-speedClient` mode scans the received video for QR codes and shows newly scanned payloads beside the video. Each unique payload is saved as a JSON file under `badges/visible/`; clicking **Clear / Archive** moves the visible JSON records to `badges/stored/`. Existing records are loaded when the speed client starts. Repeated frames showing a badge do not create duplicate records. Use the mouse wheel to scroll the visible badge list.
+The `-speedClient` mode reads printed badge text from the received video with Tesseract OCR and shows each recognized badge beside the video as name, company, and location. Reading runs on a background thread about twice per second, and a badge is saved only after it is read identically twice in a row, which filters out one-off misreads. Each unique badge (matched by name and company) is saved as a JSON file under `badges/visible/` containing the name, company, location, the raw lines that were read, and a timestamp. Clicking **Clear / Archive** moves the visible JSON records to `badges/stored/`. Existing records are loaded when the speed client starts. Use the mouse wheel to scroll the visible badge list.
 
-QR payloads are saved as-is; the reader does not open links or infer contact details. Treat the saved files as personal information and keep them private.
+The parser expects the badge layout used by the event badges tested so far: first name, full name, company (one to three lines), then `CITY, ST`, printed upright. Hold the badge upright, flat, and facing the camera. Other badge layouts may need changes to `parse_badge_lines` in `video_broadcast.cpp`.
+
+Badges do not include email addresses or phone numbers, so saved records identify people by name and company only. Treat the saved files as personal information and keep them private.
+
+Ubuntu dependencies:
+
+```
+sudo apt install tesseract-ocr tesseract-ocr-eng libtesseract-dev libleptonica-dev
+```
 
 ## Other considerations:
 

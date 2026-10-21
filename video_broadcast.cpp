@@ -11,11 +11,15 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <memory>
+#include <mutex>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -25,7 +29,9 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/objdetect.hpp>
-#include <opencv2/wechat_qrcode.hpp>
+
+#include <tesseract/baseapi.h>
+#include <tesseract/resultiterator.h>
 
 #include "sisci_api.h"
 #include "sisci_error.h"
@@ -87,7 +93,7 @@ extern "C" {
 #define MAX_WINDOW_HEIGHT 864
 
 const int NUM_SIZE_PRESETS = 5;
-const int DEFAULT_WINDOW_SIZE_PRESET = 2;
+const int DEFAULT_WINDOW_SIZE_PRESET = 4;
 const int WINDOW_WIDTH_PRESETS[NUM_SIZE_PRESETS] = { 426, 640, 854, 1280, 1536 };
 const int WINDOW_HEIGHT_PRESETS[NUM_SIZE_PRESETS] = { 240, 360, 480, 720, 864 };
 
@@ -125,9 +131,16 @@ struct SpeedClientMetrics {
     double sample_latency_ms_total = 0.0;
 };
 
+struct BadgeInfo {
+    std::string name;
+    std::string company;
+    std::string location;
+    std::string raw_text;
+};
+
 struct BadgeRecord {
     std::string filename;
-    std::string payload;
+    BadgeInfo info;
     std::string scanned_at;
 };
 
@@ -135,7 +148,7 @@ struct BadgeStore {
     std::filesystem::path visible_directory = "badges/visible";
     std::filesystem::path stored_directory = "badges/stored";
     std::vector<BadgeRecord> visible_records;
-    std::set<std::string> known_payloads;
+    std::set<std::string> known_badges;
 };
 
 struct SpeedClientLayout {
@@ -517,10 +530,17 @@ static bool read_json_string(const std::string& json, const std::string& key, st
     return false;
 }
 
+static std::string badge_key(const BadgeInfo& info)
+{
+    std::string key = info.name + "|" + info.company;
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+    return key;
+}
+
 static bool load_badge_directory(
     const std::filesystem::path& directory,
     std::vector<BadgeRecord>* records,
-    std::set<std::string>* known_payloads)
+    std::set<std::string>* known_badges)
 {
     std::error_code error;
     if (!std::filesystem::exists(directory, error)) {
@@ -549,12 +569,15 @@ static bool load_badge_directory(
         std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
         BadgeRecord record;
         record.filename = file.path().filename().string();
-        if (!read_json_string(json, "payload", &record.payload) || record.payload.empty()) {
+        if (!read_json_string(json, "name", &record.info.name) || record.info.name.empty()) {
             fprintf(stderr, "Ignoring invalid badge JSON %s\n", file.path().c_str());
             continue;
         }
+        read_json_string(json, "company", &record.info.company);
+        read_json_string(json, "location", &record.info.location);
+        read_json_string(json, "raw_text", &record.info.raw_text);
         read_json_string(json, "scanned_at", &record.scanned_at);
-        known_payloads->insert(record.payload);
+        known_badges->insert(badge_key(record.info));
         if (records != NULL) {
             records->push_back(record);
         }
@@ -575,8 +598,8 @@ static bool initialize_badge_store(BadgeStore* store)
         fprintf(stderr, "Could not create %s: %s\n", store->stored_directory.c_str(), error.message().c_str());
         return false;
     }
-    if (!load_badge_directory(store->visible_directory, &store->visible_records, &store->known_payloads) ||
-        !load_badge_directory(store->stored_directory, NULL, &store->known_payloads)) {
+    if (!load_badge_directory(store->visible_directory, &store->visible_records, &store->known_badges) ||
+        !load_badge_directory(store->stored_directory, NULL, &store->known_badges)) {
         return false;
     }
     std::sort(store->visible_records.begin(), store->visible_records.end(),
@@ -597,9 +620,10 @@ static std::string current_timestamp()
     return timestamp.str();
 }
 
-static bool save_badge(BadgeStore* store, const std::string& payload)
+static bool save_badge(BadgeStore* store, const BadgeInfo& info)
 {
-    if (payload.empty() || store->known_payloads.count(payload) != 0) {
+    const std::string key = badge_key(info);
+    if (info.name.empty() || store->known_badges.count(key) != 0) {
         return true;
     }
     const std::string scanned_at = current_timestamp();
@@ -613,15 +637,18 @@ static bool save_badge(BadgeStore* store, const std::string& payload)
         return false;
     }
     output << "{\n  \"scanned_at\": \"" << json_escape(scanned_at)
-           << "\",\n  \"payload\": \"" << json_escape(payload) << "\"\n}\n";
+           << "\",\n  \"name\": \"" << json_escape(info.name)
+           << "\",\n  \"company\": \"" << json_escape(info.company)
+           << "\",\n  \"location\": \"" << json_escape(info.location)
+           << "\",\n  \"raw_text\": \"" << json_escape(info.raw_text) << "\"\n}\n";
     output.close();
     if (!output) {
         fprintf(stderr, "Could not finish writing badge record %s\n", path.c_str());
         return false;
     }
-    store->visible_records.push_back({ filename, payload, scanned_at });
-    store->known_payloads.insert(payload);
-    fprintf(stderr, "Saved badge QR payload to %s\n", path.c_str());
+    store->visible_records.push_back({ filename, info, scanned_at });
+    store->known_badges.insert(key);
+    fprintf(stderr, "Saved badge %s (%s) to %s\n", info.name.c_str(), info.company.c_str(), path.c_str());
     return true;
 }
 
@@ -731,18 +758,12 @@ static SDL_Rect draw_badge_panel(
         SDL_RenderFillRect(renderer, &card);
         y += 10;
         int payload_height = 0;
-        size_t field_start = 0;
-        while (field_start <= record.payload.size()) {
-            size_t field_end = record.payload.find('~', field_start);
-            const std::string field = record.payload.substr(
-                field_start, field_end == std::string::npos ? std::string::npos : field_end - field_start);
-            payload_height += render_wrapped_text(
-                renderer, font, left, y + payload_height, content_width, field, { 220, 230, 245, 255 });
-            if (field_end == std::string::npos) {
-                break;
-            }
-            field_start = field_end + 1;
-        }
+        payload_height += render_wrapped_text(
+            renderer, font, left, y, content_width, record.info.name, { 255, 255, 255, 255 });
+        payload_height += render_wrapped_text(
+            renderer, font, left, y + payload_height, content_width, record.info.company, { 180, 220, 255, 255 });
+        payload_height += render_wrapped_text(
+            renderer, font, left, y + payload_height, content_width, record.info.location, { 170, 180, 195, 255 });
         y += std::max(payload_height, font != NULL ? TTF_FontLineSkip(font) : 20) + 10;
     }
     SDL_RenderSetClipRect(renderer, NULL);
@@ -763,28 +784,198 @@ static SDL_Rect draw_badge_panel(
     return layout.clear_button;
 }
 
-// The WeChat decoder finds small or soft QR codes that the basic OpenCV decoder misses,
-// so it is tried first with the basic decoder as a fallback.
-static void scan_badge_qr(
-    cv::wechat_qrcode::WeChatQRCode* detector,
-    cv::QRCodeDetector* fallback_detector,
-    BadgeStore* store,
-    AVFrame* frame,
-    int frame_width,
-    int frame_height)
+struct OcrLine {
+    std::string text;
+    int top;
+};
+
+static std::string normalize_ocr_text(const std::string& text)
 {
-    cv::Mat grayscale(frame_height, frame_width, CV_8UC1, frame->data[0], frame->linesize[0]);
-    std::vector<std::string> payloads = detector->detectAndDecode(grayscale);
-    if (payloads.empty()) {
-        std::string payload = fallback_detector->detectAndDecode(grayscale);
-        if (!payload.empty()) {
-            payloads.push_back(payload);
+    std::string result;
+    bool pending_space = false;
+    for (unsigned char c : text) {
+        if (std::isspace(c)) {
+            pending_space = !result.empty();
+        } else {
+            if (pending_space) {
+                result.push_back(' ');
+                pending_space = false;
+            }
+            result.push_back(static_cast<char>(c));
         }
     }
-    for (const std::string& payload : payloads) {
-        save_badge(store, payload);
-    }
+    return result;
 }
+
+static std::string upper_case(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::toupper(c); });
+    return text;
+}
+
+// Badges print the first name, then the full name, then the company on one or two lines,
+// then "CITY, ST". The lowest "CITY, ST" line is the attendee's; an event banner above
+// the name can match the same pattern, so lines are anchored on the name instead.
+static bool parse_badge_lines(std::vector<OcrLine> lines, BadgeInfo* info)
+{
+    static const std::regex location_pattern("^[A-Za-z][A-Za-z .'-]*, ?[A-Z]{2}\\.?$");
+    std::sort(lines.begin(), lines.end(), [](const OcrLine& a, const OcrLine& b) { return a.top < b.top; });
+
+    int location_index = -1;
+    for (int i = static_cast<int>(lines.size()) - 1; i >= 0; --i) {
+        if (std::regex_match(lines[i].text, location_pattern)) {
+            location_index = i;
+            break;
+        }
+    }
+    if (location_index < 3) {
+        return false;
+    }
+
+    for (int name_index = location_index - 2; name_index >= 1; --name_index) {
+        const std::string first_name = upper_case(lines[name_index - 1].text);
+        const std::string full_name = upper_case(lines[name_index].text);
+        const bool has_surname = full_name.find(' ') != std::string::npos;
+        if (first_name.size() < 2 || !has_surname || full_name.compare(0, first_name.size(), first_name) != 0) {
+            continue;
+        }
+        const int company_lines = location_index - name_index - 1;
+        if (company_lines < 1 || company_lines > 3) {
+            continue;
+        }
+        info->name = lines[name_index].text;
+        info->company.clear();
+        for (int i = name_index + 1; i < location_index; ++i) {
+            info->company += (info->company.empty() ? "" : " ") + lines[i].text;
+        }
+        info->location = lines[location_index].text;
+        info->raw_text.clear();
+        for (int i = name_index - 1; i <= location_index; ++i) {
+            info->raw_text += (info->raw_text.empty() ? "" : "\n") + lines[i].text;
+        }
+        return true;
+    }
+    return false;
+}
+
+// Tesseract is slow relative to the video frame rate, so it runs on its own thread
+// and works on one grayscale frame at a time.
+class BadgeOcrWorker {
+public:
+    BadgeOcrWorker()
+    {
+        if (api_.Init(NULL, "eng") != 0) {
+            fprintf(stderr, "Warning: Could not initialize Tesseract; badge text reading is disabled\n");
+            return;
+        }
+        api_.SetPageSegMode(tesseract::PSM_SPARSE_TEXT);
+        enabled_ = true;
+        thread_ = std::thread(&BadgeOcrWorker::run, this);
+    }
+
+    ~BadgeOcrWorker()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        wake_.notify_one();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        api_.End();
+    }
+
+    bool enabled() const { return enabled_; }
+
+    bool idle()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !busy_;
+    }
+
+    void submit(const cv::Mat& grayscale)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            grayscale.copyTo(job_);
+            busy_ = true;
+        }
+        wake_.notify_one();
+    }
+
+    // Returns true once per finished job; `found` says whether a badge was recognized.
+    bool take_result(bool* found, BadgeInfo* info)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!has_result_) {
+            return false;
+        }
+        has_result_ = false;
+        *found = result_found_;
+        *info = result_;
+        return true;
+    }
+
+private:
+    void run()
+    {
+        while (true) {
+            cv::Mat image;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait(lock, [this] { return stop_ || busy_; });
+                if (stop_) {
+                    return;
+                }
+                image = job_;
+            }
+
+            std::vector<OcrLine> lines;
+            api_.SetImage(image.data, image.cols, image.rows, 1, static_cast<int>(image.step));
+            api_.Recognize(NULL);
+            tesseract::ResultIterator* iterator = api_.GetIterator();
+            if (iterator != NULL) {
+                do {
+                    const float confidence = iterator->Confidence(tesseract::RIL_TEXTLINE);
+                    char* raw = iterator->GetUTF8Text(tesseract::RIL_TEXTLINE);
+                    int left = 0, top = 0, right = 0, bottom = 0;
+                    iterator->BoundingBox(tesseract::RIL_TEXTLINE, &left, &top, &right, &bottom);
+                    if (raw != NULL) {
+                        std::string text = normalize_ocr_text(raw);
+                        if (confidence >= 60.0F && text.size() >= 2) {
+                            lines.push_back({ text, top });
+                        }
+                        delete[] raw;
+                    }
+                } while (iterator->Next(tesseract::RIL_TEXTLINE));
+                delete iterator;
+            }
+
+            BadgeInfo info;
+            const bool found = parse_badge_lines(lines, &info);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                result_found_ = found;
+                result_ = info;
+                has_result_ = true;
+                busy_ = false;
+            }
+        }
+    }
+
+    tesseract::TessBaseAPI api_;
+    std::thread thread_;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    cv::Mat job_;
+    BadgeInfo result_;
+    bool enabled_ = false;
+    bool stop_ = false;
+    bool busy_ = false;
+    bool has_result_ = false;
+    bool result_found_ = false;
+};
 
 static void draw_speed_gauge(
     SDL_Renderer* renderer,
@@ -1392,13 +1583,20 @@ int client_read_video_loop(
     uint32_t frame_interval_ms = 1e3 / frame_rate;
     SpeedClientMetrics metrics;
     BadgeStore badge_store;
-    cv::wechat_qrcode::WeChatQRCode qr_detector;
-    cv::QRCodeDetector fallback_qr_detector;
     if (speed_client && !initialize_badge_store(&badge_store)) {
         return 1;
     }
-    uint32_t last_qr_scan_ms = 0;
     size_t badge_scroll = 0;
+    std::unique_ptr<BadgeOcrWorker> ocr_worker;
+    if (speed_client) {
+        ocr_worker.reset(new BadgeOcrWorker());
+    }
+    uint32_t last_ocr_ms = 0;
+    std::string pending_key;
+    int pending_count = 0;
+    // A badge must be read identically this many times in a row before it is saved,
+    // which filters out one-off OCR misreads.
+    const int required_matches = 2;
 
     while (true) {
 
@@ -1455,13 +1653,26 @@ int client_read_video_loop(
 
         if (speed_client) {
             uint32_t now_ms = SDL_GetTicks();
-            if (last_qr_scan_ms == 0 || now_ms - last_qr_scan_ms >= 300) {
-                scan_badge_qr(&qr_detector, &fallback_qr_detector, &badge_store, scaled_frame, window_width, window_height);
-                last_qr_scan_ms = now_ms;
-                badge_scroll = badge_store.visible_records.empty()
-                    ? 0
-                    : std::min(badge_scroll, badge_store.visible_records.size() - 1);
+            bool badge_found = false;
+            BadgeInfo badge_info;
+            if (ocr_worker->enabled() && ocr_worker->take_result(&badge_found, &badge_info)) {
+                const std::string key = badge_found ? badge_key(badge_info) : std::string();
+                pending_count = (!key.empty() && key == pending_key) ? pending_count + 1 : (key.empty() ? 0 : 1);
+                pending_key = key;
+                if (pending_count >= required_matches) {
+                    save_badge(&badge_store, badge_info);
+                    pending_count = 0;
+                    pending_key.clear();
+                }
             }
+            if (ocr_worker->enabled() && ocr_worker->idle() && (last_ocr_ms == 0 || now_ms - last_ocr_ms >= 500)) {
+                cv::Mat luma(window_height, window_width, CV_8UC1, scaled_frame->data[0], scaled_frame->linesize[0]);
+                ocr_worker->submit(luma);
+                last_ocr_ms = now_ms;
+            }
+            badge_scroll = badge_store.visible_records.empty()
+                ? 0
+                : std::min(badge_scroll, badge_store.visible_records.size() - 1);
             uint64_t frame_bytes = static_cast<uint64_t>(window_width) * static_cast<uint64_t>(window_height) * 3ULL / 2ULL;
             double measured_latency_ms = std::chrono::duration<double, std::milli>(inference_end - frame_start).count();
 
