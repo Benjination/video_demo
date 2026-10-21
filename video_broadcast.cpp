@@ -81,13 +81,14 @@ extern "C" {
 // max sizes are used to avoid segfaults when the sizes do not match.
 // (Segment sizes can be increased in SISCI, but preallocation is quite conservative
 //  so by default they are just 16MiB)
-#define MAX_WINDOW_WIDTH 1920
-#define MAX_WINDOW_HEIGHT 1080
+// SISCI rejects segments larger than 2 MiB on this system; 1536x864 YUV420 is the largest 16:9 frame that fits.
+#define MAX_WINDOW_WIDTH 1536
+#define MAX_WINDOW_HEIGHT 864
 
 const int NUM_SIZE_PRESETS = 5;
 const int DEFAULT_WINDOW_SIZE_PRESET = 2;
-const int WINDOW_WIDTH_PRESETS[NUM_SIZE_PRESETS] = { 426, 640, 854, 1280, 1920 };
-const int WINDOW_HEIGHT_PRESETS[NUM_SIZE_PRESETS] = { 240, 360, 480, 720, 1080 };
+const int WINDOW_WIDTH_PRESETS[NUM_SIZE_PRESETS] = { 426, 640, 854, 1280, 1536 };
+const int WINDOW_HEIGHT_PRESETS[NUM_SIZE_PRESETS] = { 240, 360, 480, 720, 864 };
 
 const char* FACE_CASCADE_PATH = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml";
 const char* PALM_MODEL_PATH = "models/palm_detection_mediapipe_2023feb.onnx";

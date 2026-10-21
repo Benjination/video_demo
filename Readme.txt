@@ -42,7 +42,7 @@ The server can use either an MP4 or another FFmpeg-supported video file with `-v
 ./video_broadcast -speedClient -size 4
 ```
 
-The IC780 camera at `/dev/video0` supports MJPEG `1920x1080` at 30 fps. Camera mode requests that full-HD input. Preset `4` configures a `1920x1080` multicast output; use the same size on the server and client because the frame dimensions determine the SISCI segment size. The default remains preset `2` (`854x480`) for compatibility with existing lower-resolution sessions.
+The IC780 camera at `/dev/video0` supports MJPEG `1920x1080` at 30 fps. Camera mode requests that full-HD input and scales it to the multicast output size. Preset `4` is `1536x864`, the largest 16:9 frame that fits in SISCI's 2 MiB segment limit on this system (a full `1920x1080` frame needs about 3.1 MB and makes segment creation fail with `Out of local resources`). Use the same size on the server and client. The default remains preset `2` (`854x480`) for compatibility with existing lower-resolution sessions.
 
 Camera frames use the same raw-frame multicast buffer as file frames, so clients require no changes.
 
