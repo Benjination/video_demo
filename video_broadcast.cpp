@@ -1164,7 +1164,8 @@ static void print_usage(void)
     printf(" -pio                           : Have server use pio for memory transfer instead of dma\n");
     printf(" -printframestatus              : Have server print out how far ahead or behind the frame is to its schedule.\n");
     printf("                                  Note: Time is mainly spent decoding, scaling, and showing frames, not on sending.\n");
-    printf(" -fullscreen                    : Start the display in fullscreen mode\n");
+    printf(" -fullscreen                    : Start the display in fullscreen mode (default)\n");
+    printf(" -windowed                      : Start the display in a window instead of fullscreen\n");
     printf(" Runtime keys                   : F11/f toggle fullscreen, Esc exits fullscreen, q quits\n");
     printf(" -width <window_width>          : Sets the window width in pixels (alternative to size preset, max=%d)\n", MAX_WINDOW_WIDTH);
     printf(" -height <window_height>        : Sets the window height in pixels (alternative to size preset, max=%d)\n", MAX_WINDOW_HEIGHT);
@@ -1189,7 +1190,7 @@ int main(int argc, char** argv)
     // Width and height of window and scaled frame
     int window_width = WINDOW_WIDTH_PRESETS[DEFAULT_WINDOW_SIZE_PRESET];
     int window_height = WINDOW_HEIGHT_PRESETS[DEFAULT_WINDOW_SIZE_PRESET];
-    bool fullscreen = false;
+    bool fullscreen = true;
 
     // Server input: a video file or a V4L2 camera device.
     bool input_set = false;
@@ -1281,6 +1282,10 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (strcmp("-windowed", argv[counter]) == 0) {
+            fullscreen = false;
+            continue;
+        }
         if (strcmp("-fullscreen", argv[counter]) == 0) {
             fullscreen = true;
             continue;
