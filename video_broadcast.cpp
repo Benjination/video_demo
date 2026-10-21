@@ -1669,10 +1669,14 @@ int client_read_video_loop(
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, &destination_rect);
 
-        run_inference(face_inference, scaled_frame, window_width, window_height);
+        if (speed_client) {
+            run_inference(face_inference, scaled_frame, window_width, window_height);
+        }
         run_hand_inference(hand_inference, scaled_frame, window_width, window_height);
         auto inference_end = std::chrono::steady_clock::now();
-        draw_inference_overlay(renderer, face_inference, window_width, window_height, destination_rect, 40, 220, 90);
+        if (speed_client) {
+            draw_inference_overlay(renderer, face_inference, window_width, window_height, destination_rect, 40, 220, 90);
+        }
         draw_hand_overlay(renderer, hand_inference, window_width, window_height, destination_rect);
 
         if (speed_client) {
@@ -1776,7 +1780,7 @@ int video_client(int window_width, int window_height, bool fullscreen, sci_desc_
     }
 
     InferenceOverlay face_inference;
-    if (!initialize_inference(&face_inference, FACE_CASCADE_PATH, "face detection")) {
+    if (speed_client && !initialize_inference(&face_inference, FACE_CASCADE_PATH, "face detection")) {
         return -1;
     }
 
